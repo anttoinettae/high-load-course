@@ -6,6 +6,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.FixedWindowRateLimiter
+import ru.quipy.common.utils.NonBlockingOngoingWindow
+import ru.quipy.common.utils.OngoingWindow
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -32,13 +36,32 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
+    private val ongoingWindow = OngoingWindow(parallelRequests)
+    private val limiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofMillis(1000))
+
     private val client = OkHttpClient.Builder().build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
+        limiter.tickBlocking()
+
         val transactionId = UUID.randomUUID()
         logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
+
+        ongoingWindow.acquire()
+//        while (true) {
+//            when (val windowResponse = ongoingWindow.putIntoWindow()) {
+//                is NonBlockingOngoingWindow.WindowResponse.Fail -> {
+//                    logger.warn("[$accountName] Too many parallel requests. Skipping payment $paymentId")
+//                    Thread.sleep(20)
+//                }
+//                is NonBlockingOngoingWindow.WindowResponse.Success -> {
+//                    logger.info("[$accountName] Processing payment $paymentId, current parallel requests: ${windowResponse.currentWinSize}")
+//                    break
+//                }
+//            }
+//        }
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
         // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
@@ -85,6 +108,8 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            ongoingWindow.release()
         }
     }
 
